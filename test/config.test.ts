@@ -221,6 +221,42 @@ describe('configDir — GBRAIN_HOME Windows path acceptance (v0.36.1.x #1019)', 
   });
 });
 
+// B6: resolveHolder — calibration/take-attribution default is configurable
+// via emotional_weight.user_holder, falling back to 'garry'.
+describe('resolveHolder (B6 — configurable calibration holder default)', () => {
+  test('falls back to "garry" when config is null/empty', async () => {
+    const { resolveHolder } = await import('../src/core/config.ts');
+    expect(resolveHolder(null)).toBe('garry');
+    expect(resolveHolder(undefined)).toBe('garry');
+    expect(resolveHolder({ engine: 'postgres' })).toBe('garry');
+  });
+
+  test('config emotional_weight.user_holder wins over the "garry" fallback', async () => {
+    const { resolveHolder } = await import('../src/core/config.ts');
+    expect(
+      resolveHolder({ engine: 'postgres', emotional_weight: { user_holder: 'sam' } }),
+    ).toBe('sam');
+  });
+
+  test('explicit override wins over both config and fallback', async () => {
+    const { resolveHolder } = await import('../src/core/config.ts');
+    // Override beats config value.
+    expect(
+      resolveHolder({ engine: 'postgres', emotional_weight: { user_holder: 'sam' } }, 'people/x'),
+    ).toBe('people/x');
+    // Override beats bare fallback.
+    expect(resolveHolder({ engine: 'postgres' }, 'people/x')).toBe('people/x');
+  });
+
+  test('null/undefined override is ignored (falls through to config/fallback)', async () => {
+    const { resolveHolder } = await import('../src/core/config.ts');
+    expect(
+      resolveHolder({ engine: 'postgres', emotional_weight: { user_holder: 'sam' } }, null),
+    ).toBe('sam');
+    expect(resolveHolder({ engine: 'postgres' }, undefined)).toBe('garry');
+  });
+});
+
 // v0.42 (#1699): content_sanity.max_markup_ratio env parsing.
 describe('loadConfig — GBRAIN_MAX_MARKUP_RATIO env (v0.42 #1699)', () => {
   async function withHomeAndEnv(env: Record<string, string | undefined>, fn: (cfg: unknown) => void) {

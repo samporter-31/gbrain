@@ -2016,6 +2016,21 @@ export async function runCycle(
         const cfgMod = await import('./config.ts');
         const calibrationConfig = cfgMod.loadConfig() ?? ({} as ReturnType<typeof cfgMod.loadConfig> & object);
         const calibrationSourceId = cycleSourceId;
+        // B6 — resolve the take-attribution holder for the nightly
+        // calibration_profile write. DB-plane (`gbrain config set
+        // emotional_weight.user_holder`) wins because that's the operator's
+        // runtime knob (same read as the recompute_emotional_weight phase);
+        // file/env config is the durable fallback; `resolveHolder` supplies
+        // the historical `'garry'` default so an unset config is unchanged.
+        let calibrationHolderOverride: string | undefined;
+        try {
+          const dbHolder = await engine.getConfig('emotional_weight.user_holder');
+          if (dbHolder) calibrationHolderOverride = dbHolder;
+        } catch {
+          // getConfig may fail on a pre-config-table brain; fall through to
+          // the file/env config resolution below.
+        }
+        const calibrationHolder = cfgMod.resolveHolder(calibrationConfig, calibrationHolderOverride);
         const calibrationCtx = {
           engine,
           config: calibrationConfig,
@@ -2051,7 +2066,7 @@ export async function runCycle(
           checkAborted(opts.signal);
           progress.start('cycle.calibration_profile');
           const { runPhaseCalibrationProfile } = await import('./cycle/calibration-profile.ts');
-          const { result, duration_ms } = await timePhase(() => runPhaseCalibrationProfile(calibrationCtx, {}) as Promise<PhaseResult>);
+          const { result, duration_ms } = await timePhase(() => runPhaseCalibrationProfile(calibrationCtx, { holder: calibrationHolder }) as Promise<PhaseResult>);
           result.duration_ms = duration_ms;
           phaseResults.push(result);
           progress.finish();

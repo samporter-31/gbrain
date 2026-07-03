@@ -143,6 +143,30 @@ export interface GBrainConfig {
   };
 
   /**
+   * v0.29 — "who is the user" identity. Two well-known sub-keys, both read
+   * ad-hoc across the codebase before this field was typed (formalized in
+   * B6). `user_holder` is the slug that owns takes / calibration profiles;
+   * it defaults to `'garry'` (gbrain's author) at every read site so an
+   * unset config keeps the historical behavior. Set it with
+   * `gbrain config set emotional_weight.user_holder <slug>` (DB plane) or in
+   * `~/.gbrain/config.json` (file plane). `high_tags` is the recompute
+   * phase's high-emotion tag override (stored as a JSON string in the DB
+   * plane; read there via `engine.getConfig`).
+   *
+   * Read sites: the brainstorm orchestrator's calibration lookup
+   * (`config.emotional_weight?.user_holder`), the `recompute_emotional_weight`
+   * phase (`engine.getConfig('emotional_weight.user_holder')`), the
+   * `calibration_profile` cycle phase, and the `gbrain calibration` CLI /
+   * `get_calibration_profile` MCP op.
+   */
+  emotional_weight?: {
+    /** Slug that owns takes + calibration profiles. Default 'garry'. */
+    user_holder?: string;
+    /** High-emotion tag override for the recompute phase (list of tags). */
+    high_tags?: string[];
+  };
+
+  /**
    * v0.27.1 — multimodal ingestion flags. Default off; opt-in.
    *
    * Unlike `embedding_model` / `embedding_dimensions` (which size the
@@ -352,6 +376,28 @@ export interface GBrainConfig {
  */
 export function isThinClient(config: GBrainConfig | null): boolean {
   return !!config?.remote_mcp;
+}
+
+/**
+ * The default holder (owner) for takes / calibration profiles. Single source
+ * of truth for the "who is the user" default so take-attribution isn't pinned
+ * to gbrain's author on every deployment (B6).
+ *
+ * Resolution: an explicit override (CLI `--holder`, MCP `holder` param) wins;
+ * else `config.emotional_weight.user_holder`; else the historical `'garry'`
+ * fallback so an unset config is byte-for-byte backward-compatible. Mirrors
+ * the inline resolution the brainstorm orchestrator already uses.
+ *
+ * Note: this reads the FILE/ENV-plane config object. Consumers that must honor
+ * a DB-plane `gbrain config set emotional_weight.user_holder` value should read
+ * `engine.getConfig('emotional_weight.user_holder')` first and pass it as
+ * `override` (see the `calibration_profile` cycle-phase dispatch).
+ */
+export function resolveHolder(
+  config: GBrainConfig | null | undefined,
+  override?: string | null,
+): string {
+  return override ?? config?.emotional_weight?.user_holder ?? 'garry';
 }
 
 /**

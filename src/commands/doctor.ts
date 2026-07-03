@@ -1202,8 +1202,20 @@ export async function checkAbandonedThreads(engine: BrainEngine): Promise<Check>
  */
 export async function checkCalibrationFreshness(engine: BrainEngine): Promise<Check> {
   try {
+    // B6 — the freshness check must read the SAME holder the nightly
+    // calibration_profile phase writes. That holder comes from the DB-plane
+    // `emotional_weight.user_holder` (set via `gbrain config set`); fall back
+    // to the historical 'garry' when unset so an unconfigured brain is
+    // unchanged. `engine` is the only thing in scope here (no config object),
+    // so read the DB plane directly — the same read the recompute phase uses.
+    let holder = 'garry';
+    try {
+      const dbHolder = await engine.getConfig('emotional_weight.user_holder');
+      if (dbHolder) holder = dbHolder;
+    } catch { /* pre-config-table brain — keep the default */ }
     const rows = await engine.executeRaw<{ generated_at: Date | null }>(
-      `SELECT MAX(generated_at) AS generated_at FROM calibration_profiles WHERE holder = 'garry'`,
+      `SELECT MAX(generated_at) AS generated_at FROM calibration_profiles WHERE holder = $1`,
+      [holder],
     );
     const generated = rows[0]?.generated_at;
     if (!generated) {

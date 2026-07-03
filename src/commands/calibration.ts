@@ -21,7 +21,7 @@
 import type { BrainEngine } from '../core/engine.ts';
 import { runPhaseCalibrationProfile } from '../core/cycle/calibration-profile.ts';
 import { sourceScopeOpts, type OperationContext } from '../core/operations.ts';
-import type { GBrainConfig } from '../core/config.ts';
+import { resolveHolder, type GBrainConfig } from '../core/config.ts';
 import { GBrainError } from '../core/types.ts';
 
 export interface CalibrationProfileRow {
@@ -158,7 +158,9 @@ export async function runCalibration(
   config: GBrainConfig,
 ): Promise<void> {
   const { opts } = parseArgs(args);
-  const holder = opts.holder ?? 'garry';
+  // B6 — CLI `--holder` wins; else config `emotional_weight.user_holder`;
+  // else the historical `'garry'` default (via resolveHolder).
+  const holder = resolveHolder(config, opts.holder);
   const sourceId = 'default';
 
   if (opts.undoWave) {
@@ -240,12 +242,14 @@ export async function getCalibrationProfileOp(
   ctx: OperationContext,
   params: { holder?: string },
 ): Promise<CalibrationProfileRow | null> {
-  const holder = params.holder ?? 'garry';
+  // B6 — explicit `holder` param wins; else config
+  // `emotional_weight.user_holder`; else the historical `'garry'` default.
+  const holder = resolveHolder(ctx.config, params.holder);
   if (typeof holder !== 'string' || holder.length === 0) {
     throw new GBrainError(
       'INVALID_HOLDER',
       'get_calibration_profile.holder must be a non-empty string',
-      'pass holder="<slug>" or omit to default to "garry"',
+      'pass holder="<slug>" or omit to default to the configured holder ("garry" if unset)',
     );
   }
   const scope = sourceScopeOpts(ctx);

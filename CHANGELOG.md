@@ -9,6 +9,9 @@ All notable changes to GBrain will be documented in this file.
 ### Added
 - `gbrain export-generated --to <dir> [--skip-existing <dir>]` — writes concept pages whose frontmatter carries `synthesized_by` to `<dir>` as markdown, adding `synthesis_origin: ai`. Skips slugs already present in any `--skip-existing` dir (dedup vs approved/pending). Inline `## Takes` fences are preserved.
 
+### Changed
+- **Calibration / take-attribution holder default is now configurable** via `emotional_weight.user_holder` (the existing "who is the user" config key), falling back to `garry` when unset so existing brains are unchanged. Wired into the nightly `calibration_profile` cycle phase (the take-attribution write path — the DB-plane `gbrain config set` value wins), the `gbrain calibration` CLI, the `get_calibration_profile` MCP op, the `calibration_freshness` doctor check, and the admin calibration HTTP endpoints. Set it with `gbrain config set emotional_weight.user_holder <slug>`.
+
 ### To take advantage of v0.42.54.0
 Rebuild the binary (`bun run build`) and deploy per host.
 

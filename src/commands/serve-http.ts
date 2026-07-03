@@ -31,7 +31,7 @@ import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/sco
 import { summarizeMcpParams, dispatchToolCall } from '../mcp/dispatch.ts';
 import { paramDefToSchema } from '../mcp/tool-defs.ts';
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
-import { loadConfig } from '../core/config.ts';
+import { loadConfig, resolveHolder } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
 import { VERSION } from '../version.ts';
 import * as db from '../core/db.ts';
@@ -1033,7 +1033,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.get('/admin/api/calibration/pattern/:id', requireAdmin, async (req: Request, res: Response) => {
     try {
       const { getLatestProfile } = await import('./calibration.ts');
-      const holder = (req.query.holder as string) || 'garry';
+      // B6 — explicit ?holder= wins; else config emotional_weight.user_holder;
+      // else the historical 'garry' default.
+      const holder = resolveHolder(config, (req.query.holder as string | undefined) || undefined);
       const profile = await getLatestProfile(engine, { holder });
       if (!profile) {
         res.status(404).json({ error: 'no_profile' });
@@ -1080,7 +1082,9 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   app.get('/admin/api/calibration/profile', requireAdmin, async (req: Request, res: Response) => {
     try {
       const { getLatestProfile } = await import('./calibration.ts');
-      const holder = (req.query.holder as string) || 'garry';
+      // B6 — explicit ?holder= wins; else config emotional_weight.user_holder;
+      // else the historical 'garry' default.
+      const holder = resolveHolder(config, (req.query.holder as string | undefined) || undefined);
       const profile = await getLatestProfile(engine, { holder });
       res.json(profile);
     } catch (err) {

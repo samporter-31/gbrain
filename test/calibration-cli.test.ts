@@ -201,6 +201,24 @@ describe('getCalibrationProfileOp (MCP)', () => {
     expect(result?.holder).toBe('garry');
   });
 
+  // B6 — config emotional_weight.user_holder overrides the 'garry' default.
+  test('config emotional_weight.user_holder wins over the "garry" default', async () => {
+    const { engine } = buildMockEngine({ rows: [buildProfile({ holder: 'sam' })] });
+    const ctx = buildCtx(engine);
+    (ctx as { config: unknown }).config = { emotional_weight: { user_holder: 'sam' } };
+    const result = await getCalibrationProfileOp(ctx, {});
+    expect(result?.holder).toBe('sam');
+  });
+
+  // B6 — an explicit param still wins over the configured holder.
+  test('explicit holder param wins over configured holder', async () => {
+    const { engine } = buildMockEngine({ rows: [buildProfile({ holder: 'people/charlie-example' })] });
+    const ctx = buildCtx(engine);
+    (ctx as { config: unknown }).config = { emotional_weight: { user_holder: 'sam' } };
+    const result = await getCalibrationProfileOp(ctx, { holder: 'people/charlie-example' });
+    expect(result?.holder).toBe('people/charlie-example');
+  });
+
   test('routes through sourceScopeOpts: scalar source-bound client gets source-scoped result', async () => {
     const rows = [
       buildProfile({ holder: 'garry', source_id: 'default' }),
