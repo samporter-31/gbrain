@@ -2,6 +2,16 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.42.54.0] - 2026-07-03
+
+**New `export-generated` command: materialize AI-generated concepts to a staging folder, stamped `synthesis_origin: ai`.**
+
+### Added
+- `gbrain export-generated --to <dir> [--skip-existing <dir>]` — writes concept pages whose frontmatter carries `synthesized_by` to `<dir>` as markdown, adding `synthesis_origin: ai`. Skips slugs already present in any `--skip-existing` dir (dedup vs approved/pending). Inline `## Takes` fences are preserved.
+
+### To take advantage of v0.42.54.0
+Rebuild the binary (`bun run build`) and deploy per host.
+
 ## [0.42.53.0] - 2026-06-23
 
 **`gbrain sync` works again on managed Postgres brains: the durable-checkpoint pin write was encoding its value the wrong way, so every multi-source sync aborted at the very first checkpoint. Fixed, plus a repo-wide sweep of the same JSONB footgun and a new CI guard so it can't come back.** A recent release added a structural check on the sync checkpoint table; the pin write that runs before every drain bound its value as a string rather than a real array, so the check rejected it and the run bailed before importing anything. The bug was invisible on the embedded engine (its driver parses the value either way) and only bit managed Postgres.
