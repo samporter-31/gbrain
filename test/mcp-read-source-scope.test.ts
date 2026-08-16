@@ -92,6 +92,17 @@ beforeEach(async () => {
   await engine.putPage('other/page', {
     type: 'note', title: 'Other page', compiled_truth: 'other content', frontmatter: {},
   }, { sourceId: 'other' });
+
+  // The duplicate-slug condition. This is the COMMON case on the brain that
+  // motivated #124 (586 slugs live in both the vault mirror and the DB-native
+  // partition), and one of those partitions is a stale fossil. A cross-partition
+  // read that silently picks one is the exact failure mode #124 exists to end.
+  await engine.putPage('shared/dup', {
+    type: 'note', title: 'Dup in wiki', compiled_truth: 'fresh wiki copy', frontmatter: {},
+  }, { sourceId: 'wiki' });
+  await engine.putPage('shared/dup', {
+    type: 'note', title: 'Dup in default', compiled_truth: 'stale fossil copy', frontmatter: {},
+  }, { sourceId: 'default' });
 });
 
 // ---------------------------------------------------------------------------
@@ -126,6 +137,45 @@ describe('#124 get_page accepts a per-call source_id', () => {
   });
 });
 
+describe('#124 a cross-partition read never silently picks one of two copies', () => {
+  test('all_sources on a duplicated slug reports ambiguity instead of an arbitrary copy', async () => {
+    // engine.getPage is `WHERE slug=$1 AND source_id = ANY(...) LIMIT 1` with no
+    // ORDER BY, so without this guard the answer is whichever row Postgres hands
+    // back first — stale fossil or fresh mirror, nondeterministically.
+    const res: any = await get_page.handler(localCtx(), { slug: 'shared/dup', all_sources: true });
+    expect(res.error).toBe('ambiguous_source');
+    expect(res.candidates.map((c: any) => c.source_id).sort()).toEqual(['default', 'wiki']);
+  });
+
+  test('the ambiguity report names the disambiguating parameter', async () => {
+    const res: any = await get_page.handler(localCtx(), { slug: 'shared/dup', source_id: '__all__' });
+    expect(res.error).toBe('ambiguous_source');
+    expect(String(res.suggestion)).toContain('source_id');
+  });
+
+  test('naming the partition resolves it to that exact copy', async () => {
+    const wiki: any = await get_page.handler(ctxOf(), { slug: 'shared/dup', source_id: 'wiki' });
+    expect(wiki.title).toBe('Dup in wiki');
+    const dflt: any = await get_page.handler(ctxOf(), { slug: 'shared/dup', source_id: 'default' });
+    expect(dflt.title).toBe('Dup in default');
+  });
+
+  test('a federated grant spanning only ONE holder of the slug is not ambiguous', async () => {
+    const page: any = await get_page.handler(remoteCtx(['wiki', 'other']), { slug: 'shared/dup', all_sources: true });
+    expect(page.title).toBe('Dup in wiki');
+  });
+
+  test('an unambiguous slug still resolves normally under all_sources', async () => {
+    const page: any = await get_page.handler(localCtx(), { slug: 'meta/telos', all_sources: true });
+    expect(page.title).toBe('Telos (wiki)');
+  });
+
+  test('the single-source path is untouched — no ambiguity check, no extra behaviour', async () => {
+    const page: any = await get_page.handler(ctxOf(), { slug: 'atoms/default-resident' });
+    expect(page.title).toBe('Default resident');
+  });
+});
+
 describe('#124 get_page source_id cannot escape a federated grant', () => {
   test('remote client granted [other] is DENIED an explicit out-of-grant source_id', async () => {
     await expect(get_page.handler(remoteCtx(['other']), { slug: 'meta/telos', source_id: 'wiki' }))
@@ -147,6 +197,32 @@ describe('#124 get_page source_id cannot escape a federated grant', () => {
     const page: any = await get_page.handler(remoteCtx(['wiki']), { slug: 'meta/telos', source_id: 'wiki' });
     expect(page.title).toBe('Telos (wiki)');
   });
+
+  test('INHERITED: a caller with NO federated grant array is not restricted by source_id', async () => {
+    // Documented here because it is a real property of the resolver, not an
+    // oversight, and #124 widens the surface it applies to (page bodies +
+    // enumeration, where before it was search results and code intel).
+    //
+    // resolveRequestedScope only enforces when `auth.allowedSources` is a
+    // NON-EMPTY array. parseLegacyTokenScope maps a STRING `permissions.
+    // source_id` grant to `{sourceId}` with no array, so a scalar-granted
+    // legacy bearer token can name another partition. Upstream calls this the
+    // "scalar-floor model" and pins it in test/source-scope-resolver.test.ts:79.
+    //
+    // It is deliberately NOT changed here: the resolver is shared with query /
+    // search_by_image / code_*, so altering it is an upstream security-semantics
+    // decision, not a #124 bug fix. Locking it per-handler instead would
+    // reintroduce exactly the per-site drift the resolver exists to prevent.
+    // If this posture is wrong, fix it once in resolveRequestedScope so every
+    // op moves together.
+    const scalarGranted = ctxOf({
+      remote: true,
+      sourceId: 'other',
+      auth: { token: 't', clientId: 'c', scopes: [] } as any, // no allowedSources
+    });
+    const page: any = await get_page.handler(scalarGranted, { slug: 'meta/telos', source_id: 'wiki' });
+    expect(page.title).toBe('Telos (wiki)');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -160,29 +236,38 @@ function slugsOf(rows: unknown): string[] {
 describe('#124 list_pages accepts a per-call source scope', () => {
   test('THE DEFECT: a default-pinned transport enumerates only the default partition', async () => {
     const rows = await list_pages.handler(ctxOf(), {});
-    expect(slugsOf(rows)).toEqual(['atoms/default-resident']);
+    expect(slugsOf(rows)).toEqual(['atoms/default-resident', 'shared/dup']);
   });
 
   test('source_id enumerates a named non-default partition', async () => {
     const rows = await list_pages.handler(ctxOf(), { source_id: 'wiki' });
-    expect(slugsOf(rows)).toEqual(['concepts/only-wiki', 'meta/telos']);
+    expect(slugsOf(rows)).toEqual(['concepts/only-wiki', 'meta/telos', 'shared/dup']);
   });
 
   test("source_id: '__all__' enumerates across partitions for a trusted local caller", async () => {
     const rows = await list_pages.handler(localCtx(), { source_id: '__all__' });
     expect(slugsOf(rows)).toEqual([
-      'atoms/default-resident', 'concepts/only-wiki', 'meta/telos', 'other/page',
+      'atoms/default-resident', 'concepts/only-wiki', 'meta/telos',
+      'other/page', 'shared/dup', 'shared/dup',
     ]);
   });
 
   test('all_sources: true is equivalent to __all__ for a trusted local caller', async () => {
     const rows = await list_pages.handler(localCtx(), { all_sources: true });
-    expect(slugsOf(rows)).toHaveLength(4);
+    expect(slugsOf(rows)).toHaveLength(6);
   });
 
   test('no param → pre-#124 scoping is unchanged (regression guard)', async () => {
     const rows = await list_pages.handler(ctxOf(), {});
-    expect(slugsOf(rows)).toEqual(['atoms/default-resident']);
+    expect(slugsOf(rows)).toEqual(['atoms/default-resident', 'shared/dup']);
+  });
+
+  test('a duplicated slug appears once PER PARTITION, distinguishable by source_id', async () => {
+    // list_pages is the disambiguation path get_page points callers at, so the
+    // two copies must be separable here even though they share a slug.
+    const rows = (await list_pages.handler(localCtx(), { all_sources: true })) as Array<{ slug: string; source_id: string }>;
+    const dups = rows.filter(r => r.slug === 'shared/dup');
+    expect(dups.map(r => r.source_id).sort()).toEqual(['default', 'wiki']);
   });
 });
 
@@ -199,7 +284,10 @@ describe('#124 list_pages source scope cannot escape a federated grant', () => {
 
   test('remote client granted [wiki, other] sees exactly its two partitions under all_sources', async () => {
     const rows = await list_pages.handler(remoteCtx(['wiki', 'other']), { all_sources: true });
-    expect(slugsOf(rows)).toEqual(['concepts/only-wiki', 'meta/telos', 'other/page']);
+    expect(slugsOf(rows)).toEqual(['concepts/only-wiki', 'meta/telos', 'other/page', 'shared/dup']);
+    // the default-partition copy of the duplicated slug stays out of the grant
+    const dups = (rows as Array<{ slug: string; source_id: string }>).filter(r => r.slug === 'shared/dup');
+    expect(dups.map(r => r.source_id)).toEqual(['wiki']);
   });
 });
 
@@ -220,6 +308,6 @@ describe('#124 list_pages rows carry source_id so a read reconciles against get_
     const wikiFromAll = all.filter(r => r.source_id === 'wiki').length;
     const wikiScoped = (await list_pages.handler(ctxOf(), { source_id: 'wiki' })) as unknown[];
     expect(wikiFromAll).toBe(wikiScoped.length);
-    expect(wikiFromAll).toBe(2);
+    expect(wikiFromAll).toBe(3);
   });
 });

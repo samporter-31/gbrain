@@ -494,6 +494,39 @@ export function resolveRequestedScope(
 }
 
 /**
+ * #124 — does this resolved scope span more than one source?
+ *
+ * `{}` means "no source filter", which spans the whole brain (trusted local
+ * `__all__`), so it counts as multi-source. A `sourceIds[]` of length > 1 is
+ * multi-source by construction. A scalar `sourceId` — or a single-element
+ * array — is not: `(source_id, slug)` is UNIQUE, so at most one row can match.
+ */
+export function isMultiSourceScope(scope: { sourceId?: string; sourceIds?: string[] }): boolean {
+  if (scope.sourceIds) return scope.sourceIds.length > 1;
+  return scope.sourceId === undefined;
+}
+
+/**
+ * #124 — which in-scope sources hold this exact slug?
+ *
+ * Uses the existing indexed `slugPrefix` range scan (it rides the
+ * `(source_id, slug)` btree) and filters to exact equality client-side, so no
+ * new engine method or SQL path is introduced. Returns the holders with enough
+ * context for the caller to pick one without a second round trip.
+ */
+async function sourcesHoldingSlug(
+  ctx: OperationContext,
+  slug: string,
+  scope: { sourceId?: string; sourceIds?: string[] },
+  includeDeleted: boolean,
+): Promise<Array<{ source_id: string; title: string; updated_at: Date }>> {
+  const rows = await ctx.engine.listPages({ slugPrefix: slug, includeDeleted, ...scope });
+  return rows
+    .filter(r => r.slug === slug)
+    .map(r => ({ source_id: r.source_id, title: r.title, updated_at: r.updated_at }));
+}
+
+/**
  * Code-intel adapter for `resolveRequestedScope`. Graph traversal
  * (code_callers/code_callees/code_blast/code_flow) is single-source by design —
  * the engine APIs and the traversal cache key take ONE `sourceId` string, not a
@@ -669,6 +702,31 @@ const get_page: Operation = {
 
     if (!page) {
       throw new OperationError('page_not_found', `Page not found: ${slug}`, includeDeleted ? 'Check the slug or use fuzzy: true' : 'Page may be soft-deleted; pass include_deleted: true to verify');
+    }
+
+    // #124: engine.getPage is `WHERE slug=$1 AND source_id = ANY(...) LIMIT 1`
+    // with NO ORDER BY, so when the resolved scope spans more than one source
+    // and the slug exists in several of them, the row returned is whichever one
+    // the planner hands back first. On a brain where a live mirror and a stale
+    // DB-native partition share slugs — the exact shape that motivated #124 —
+    // that means a cross-partition read can silently answer from the fossil.
+    // Answering ambiguously-but-confidently is the failure this ticket exists to
+    // end, so report the ambiguity and name the disambiguating parameter instead.
+    // Mirrors the existing `ambiguous_slug` contract above (returned, not thrown).
+    //
+    // Only runs on a genuinely multi-source scope: a scalar `sourceId` is
+    // unambiguous by the (source_id, slug) UNIQUE constraint, so the pre-#124
+    // single-source path costs nothing extra.
+    if (isMultiSourceScope(sourceOpts)) {
+      const holders = await sourcesHoldingSlug(ctx, page.slug, sourceOpts, includeDeleted);
+      if (holders.length > 1) {
+        return {
+          error: 'ambiguous_source',
+          message: `Slug '${page.slug}' exists in ${holders.length} sources: ${holders.map(h => h.source_id).join(', ')}`,
+          suggestion: `Pass source_id=<one of them> to choose, or list_pages to compare them (each row carries source_id).`,
+          candidates: holders,
+        };
+      }
     }
 
     // v0.37.0 (D11): op-layer write-back for the `last_retrieved_at` stale

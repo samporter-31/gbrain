@@ -842,6 +842,15 @@ export function formatResult(opName: string, result: unknown): string {
       if (r.error === 'ambiguous_slug') {
         return `Ambiguous slug. Did you mean:\n${r.candidates.map((c: string) => `  ${c}`).join('\n')}\n`;
       }
+      // #124: the slug is unique but lives in several in-scope sources. Without
+      // this branch the ambiguity envelope falls through to serializeMarkdown
+      // and prints an empty document, hiding the very conflict it reports.
+      if (r.error === 'ambiguous_source') {
+        const rows = r.candidates.map((c: any) =>
+          `  ${c.source_id}\t${c.updated_at?.toString().slice(0, 10) || '?'}\t${c.title}`,
+        ).join('\n');
+        return `${r.message}\n${rows}\n${r.suggestion}\n`;
+      }
       return serializeMarkdown(r.frontmatter || {}, r.compiled_truth || '', r.timeline || '', {
         type: r.type, title: r.title, tags: r.tags || [],
       });
@@ -849,8 +858,13 @@ export function formatResult(opName: string, result: unknown): string {
     case 'list_pages': {
       const pages = result as any[];
       if (pages.length === 0) return 'No pages found.\n';
+      // #124: when the result spans sources, lead each row with its source —
+      // otherwise a duplicated slug renders as two identical-looking lines and
+      // the cross-source enumeration is unreadable. Single-source results keep
+      // the pre-#124 column layout so existing output/scripts are unaffected.
+      const spansSources = new Set(pages.map(p => p.source_id)).size > 1;
       return pages.map(p =>
-        `${p.slug}\t${p.type}\t${p.updated_at?.toString().slice(0, 10) || '?'}\t${p.title}`,
+        `${spansSources ? `${p.source_id}\t` : ''}${p.slug}\t${p.type}\t${p.updated_at?.toString().slice(0, 10) || '?'}\t${p.title}`,
       ).join('\n') + '\n';
     }
     case 'search':
