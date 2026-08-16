@@ -454,7 +454,7 @@ export function linkReadScopeOpts(ctx: OperationContext): { sourceId?: string; s
  *
  * This is the SINGLE resolver for every read op that accepts a per-call
  * `source_id` / `all_sources` parameter (query, code_callers, code_callees,
- * get_page, search_by_image, code_blast, code_flow). Inlining the `__all__`
+ * get_page, list_pages, search_by_image, code_blast, code_flow). Inlining the `__all__`
  * branch per handler is the bug class that leaked cross-source reads (#1924,
  * #1371): a remote client could pass `source_id: '__all__'` to opt out of its
  * grant, or pass an explicit out-of-grant `source_id` that was never checked.
@@ -627,6 +627,8 @@ const get_page: Operation = {
     slug: { type: 'string', required: true, description: 'Page slug' },
     fuzzy: { type: 'boolean', description: 'Enable fuzzy slug resolution (default: false)' },
     include_deleted: { type: 'boolean', description: 'v0.26.5: surface soft-deleted pages with deleted_at populated (default: false). Used by restore workflows.' },
+    source_id: { type: 'string', description: "Scope to a single source. Defaults to ctx.sourceId (set from CLI --source / GBRAIN_SOURCE / .gbrain-source dotfile). '__all__' spans every source for trusted local callers, your granted sources for remote callers." },
+    all_sources: { type: 'boolean', description: 'Span sources (equivalent to source_id=__all__): every source locally, your grant remotely. Use when you do not know which source holds the slug.' },
   },
   handler: async (ctx, p) => {
     const slug = p.slug as string;
@@ -638,7 +640,18 @@ const get_page: Operation = {
     // with a federated `allowedSources` grant (and no single ctx.sourceId) got
     // an UNSCOPED exact lookup — a cross-source read of any page by slug. getPage
     // now honors sourceIds[] (both engines), so the same scope closes both paths.
-    const sourceOpts = sourceScopeOpts(ctx);
+    //
+    // #124: that ladder had no per-call rung. Every MCP transport pins
+    // ctx.sourceId to `GBRAIN_SOURCE || 'default'` (src/mcp/server.ts), so a
+    // caller who knew the page lived elsewhere had no way to say so and got
+    // page_not_found while brain-wide get_stats reported the page's source as
+    // populated. Routing through resolveRequestedScope — the SAME resolver
+    // query/search_by_image/code_* already use — adds the rung without adding a
+    // second federation mechanism, and keeps the grant fail-closed for remote
+    // callers ('__all__' collapses to the grant; an out-of-grant source_id is
+    // permission_denied).
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const sourceOpts = resolveRequestedScope(ctx, sourceIdParam, p.all_sources === true);
     const fuzzyScope = sourceOpts;
 
     let page = await ctx.engine.getPage(slug, { includeDeleted, ...sourceOpts });
@@ -1349,6 +1362,8 @@ const list_pages: Operation = {
       description: 'Sort order. Default updated_desc (matches pre-v0.29). Options: updated_desc, updated_asc, created_desc, slug.',
     },
     include_deleted: { type: 'boolean', description: 'v0.26.5: include soft-deleted pages (default: false). Used by restore workflows and operator diagnostics.' },
+    source_id: { type: 'string', description: "Scope to a single source. Defaults to ctx.sourceId (set from CLI --source / GBRAIN_SOURCE / .gbrain-source dotfile). '__all__' spans every source for trusted local callers, your granted sources for remote callers." },
+    all_sources: { type: 'boolean', description: 'Enumerate across sources (equivalent to source_id=__all__): every source locally, your grant remotely. Each row carries source_id so the result can be reconciled against get_stats per source.' },
   },
   handler: async (ctx, p) => {
     // Whitelist the sort enum at the handler before passing to the engine.
@@ -1363,7 +1378,13 @@ const list_pages: Operation = {
     // enumerate src-B pages. Pre-fix, ctx.sourceId / ctx.auth?.allowedSources
     // were ignored at this op handler and the engine returned every source's
     // pages indiscriminately.
-    const scope = sourceScopeOpts(ctx);
+    //
+    // #124: same per-call rung as get_page. A 'default'-pinned MCP transport
+    // could only ever enumerate 'default', which read as "the brain contains
+    // this and nothing else" while get_stats counted every source. Same single
+    // resolver, same fail-closed grant semantics.
+    const sourceIdParam = typeof p.source_id === 'string' ? p.source_id : undefined;
+    const scope = resolveRequestedScope(ctx, sourceIdParam, p.all_sources === true);
     const pages = await ctx.engine.listPages({
       type: p.type as any,
       tag: p.tag as string,
@@ -1378,6 +1399,12 @@ const list_pages: Operation = {
       type: pg.type,
       title: pg.title,
       updated_at: pg.updated_at,
+      // #124: attribute every row to its source. Without this a cross-source
+      // enumeration is unreconcilable against get_stats (which reports
+      // per-source counts) and a same-slug page appearing in two sources is
+      // indistinguishable from one page. Not a scope widening — the rows
+      // returned are exactly those the scope above already permitted.
+      source_id: pg.source_id,
       ...(pg.deleted_at ? { deleted_at: pg.deleted_at } : {}),
     }));
   },
