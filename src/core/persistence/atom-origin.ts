@@ -7,6 +7,15 @@
  * followed and an atom behind one keeps a missing origin. Static strings only.
  */
 
+/**
+ * SQL: the source atom `a`'s origin page lives in. An extract_atoms read/write split (sources.config
+ * extract_atoms_write_source) writes atoms into another source than the page they came from and stamps
+ * `source_page_source_id` with the page's source; every other atom's origin lives in its own source.
+ */
+export function atomOriginSourceSql(a: string): string {
+  return `COALESCE(NULLIF(${a}.frontmatter->>'source_page_source_id', ''), ${a}.source_id)`;
+}
+
 /** SQL: the slug a rename moved the page that held `slugSql` in source `sourceIdSql` to, or NULL (one probe of slug_aliases' (source_id, alias_slug) key). */
 export function renamedSlugSql(sourceIdSql: string, slugSql: string): string {
   return `(SELECT renamed.canonical_slug FROM slug_aliases renamed
@@ -16,14 +25,15 @@ export function renamedSlugSql(sourceIdSql: string, slugSql: string): string {
 /** SQL: the slug atom `a`'s origin page holds now: its `source_slug` while any page row holds it, deleted or not, else the slug a rename moved that page to. A page created later at the old slug, even one deleted since, is never passed over for the renamed page. */
 export function atomOriginSlugSql(a: string): string {
   const slug = `(${a}.frontmatter->>'source_slug')`;
-  return `COALESCE(CASE WHEN NOT EXISTS (SELECT 1 FROM pages live_origin WHERE live_origin.source_id=${a}.source_id
-      AND live_origin.slug=${slug}) THEN ${renamedSlugSql(`${a}.source_id`, slug)} END, ${slug})`;
+  const src = atomOriginSourceSql(a);
+  return `COALESCE(CASE WHEN NOT EXISTS (SELECT 1 FROM pages live_origin WHERE live_origin.source_id=${src}
+      AND live_origin.slug=${slug}) THEN ${renamedSlugSql(src, slug)} END, ${slug})`;
 }
 
 /** SQL array of every slug that may name atom `a`'s origin (its `source_slug` and that slug's rename target), for rules where either page being private makes the atom private. */
 export function atomOriginSlugsSql(a: string): string {
   const slug = `(${a}.frontmatter->>'source_slug')`;
-  return `ARRAY[${slug}, ${renamedSlugSql(`${a}.source_id`, slug)}]`;
+  return `ARRAY[${slug}, ${renamedSlugSql(atomOriginSourceSql(a), slug)}]`;
 }
 
 /**
@@ -33,6 +43,6 @@ export function atomOriginSlugsSql(a: string): string {
  */
 export function atomMovedOriginPrivateSql(a: string): string {
   return `EXISTS (SELECT 1 FROM slug_rename_history moved JOIN pages moved_to ON moved_to.source_id=moved.source_id
-    AND moved_to.slug=moved.new_slug WHERE moved.source_id=${a}.source_id AND moved.old_slug=(${a}.frontmatter->>'source_slug')
+    AND moved_to.slug=moved.new_slug WHERE moved.source_id=${atomOriginSourceSql(a)} AND moved.old_slug=(${a}.frontmatter->>'source_slug')
     AND moved_to.frontmatter->>'visibility'='private')`;
 }

@@ -62,8 +62,13 @@ export type ExtractReceiptRound =
 export interface ExtractReceiptInput {
   /** Kind of extraction (matches the conceptual handler name). */
   kind: string;
-  /** Brain source the extraction targeted. */
+  /** Brain source the extraction targeted. This is the provenance label: it names the receipt (slug, title, body, `source_id`). */
   source_id: string;
+  /**
+   * Source the receipt PAGE is written into, when that is not `source_id` (an extract_atoms read/write split writes
+   * atoms and receipts into another partition than the one it read). Unset: the page lives in `source_id`.
+   */
+  target_source_id?: string;
   /** Op-checkpoint id or progressive-batch operation_id for trace continuity. */
   run_id: string;
   /** Which round this receipt covers. */
@@ -184,6 +189,7 @@ function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unk
     total_rows: input.total_rows,
     cost_usd: input.cost_usd,
   };
+  if (input.target_source_id && input.target_source_id !== input.source_id) fm.written_to_source_id = input.target_source_id;
   if (input.model_id) fm.model_id = input.model_id;
   if (typeof input.eval_pass === 'boolean') fm.eval_pass = input.eval_pass;
   if (typeof input.eval_score === 'number') fm.eval_score = input.eval_score;
@@ -221,12 +227,14 @@ export async function writeReceipt(
   const frontmatter = buildReceiptFrontmatter(input);
   const compiled_truth = buildReceiptBody(input);
 
+  // The receipt PAGE lives in the write target; `source_id` stays the provenance label (slug, title, body).
+  const target = input.target_source_id ?? input.source_id;
   const page = await maintenanceTransaction(engine, async tx => {
-    await tx.lockPageKeys([{ sourceId: input.source_id, slug }]);
+    await tx.lockPageKeys([{ sourceId: target, slug }]);
     const [prior] = await tx.executeRaw<{ type: string | null; source_path: string | null; source_uri: string | null; withheld_source_path: string | null }>(
-      'SELECT type, source_path, source_uri, withheld_source_path FROM pages WHERE source_id=$1 AND slug=$2', [input.source_id, slug]);
+      'SELECT type, source_path, source_uri, withheld_source_path FROM pages WHERE source_id=$1 AND slug=$2', [target, slug]);
     if (!isNeverFiledDerivedPage(slug, prior ?? {}) || (prior && prior.type !== 'extract_receipt')) {
-      throw new Error(`Extract receipt ${slug} (source ${input.source_id}) was not written: that slug holds a content page or a page with a file in Git, and a receipt is database-only bookkeeping.`);
+      throw new Error(`Extract receipt ${slug} (source ${target}) was not written: that slug holds a content page or a page with a file in Git, and a receipt is database-only bookkeeping.`);
     }
     const written = await tx.putPage(
       slug,
@@ -236,13 +244,13 @@ export async function writeReceipt(
         compiled_truth,
         frontmatter,
       },
-      { sourceId: input.source_id },
+      { sourceId: target },
     );
-    await resealSafeChunks(tx, slug, input.source_id);
+    await resealSafeChunks(tx, slug, target);
     const [sealed] = await tx.executeRaw<{ sealed: boolean }>(
       `SELECT chunker_version >= ${SAFE_FENCE_CHUNKER_VERSION} AND text_projection_revision = knowledge_revision AS sealed FROM pages WHERE source_id=$1 AND slug=$2`,
-      [input.source_id, slug]);
-    if (sealed?.sealed !== true) throw new Error(`Extract receipt ${slug} (source ${input.source_id}) was not written: its chunks could not be sealed in the writing transaction.`);
+      [target, slug]);
+    if (sealed?.sealed !== true) throw new Error(`Extract receipt ${slug} (source ${target}) was not written: its chunks could not be sealed in the writing transaction.`);
     // #4009: receipts are audit artifacts — deliberately never run through
     // the contextual-retrieval ladder. Born with a NULL
     // contextual_retrieval_mode they tripped doctor's
@@ -251,7 +259,7 @@ export async function writeReceipt(
     // NOT permanent: a reindex that takes the DB fallback clears the stamp
     // and it recurs per receipt — the doctor check also excludes
     // type='extract_receipt' from mode_null (belt+braces).
-    await tx.updatePageContextualRetrievalState(slug, input.source_id, 'none', null);
+    await tx.updatePageContextualRetrievalState(slug, target, 'none', null);
     return written;
   });
 

@@ -30,7 +30,7 @@ import { asciiLower, asciiLowerSql, edgeTrimSql } from '../edge-whitespace.ts';
 import { ACCESS_ID_RE, hasReaders, MEMBER_PAGE_PREFIX, normalizePrincipal, readersAllow, validIdentity } from '../access/principals.ts';
 import { ruleCoversSql, validPrefix, validQualifiedRuleId } from '../access/folder-rules.ts';
 import { holdingSlugSql } from '../facts-fence.ts';
-import { atomMovedOriginPrivateSql, atomOriginSlugsSql } from '../persistence/atom-origin.ts';
+import { atomMovedOriginPrivateSql, atomOriginSlugsSql, atomOriginSourceSql } from '../persistence/atom-origin.ts';
 
 export const REMOTE_PRIVATE_PAGES_KEY = 'search.remote_private_pages';
 
@@ -711,7 +711,7 @@ export function privateSnapshotFilterFragment(alias: string): string {
 export const CONCEPT_INPUTS_PRIVATE_SINCE = 311;
 
 function derivedOriginPrivateSql(p: string, shadowedPages: boolean): string {
-  const privateOrigin = (atom: string, alias: string) => `EXISTS (SELECT 1 FROM pages ${alias} WHERE ${alias}.source_id = ${atom}.source_id
+  const privateOrigin = (atom: string, alias: string) => `EXISTS (SELECT 1 FROM pages ${alias} WHERE ${alias}.source_id = ${atomOriginSourceSql(atom)}
       AND ${alias}.slug = ANY(${atomOriginSlugsSql(atom)}) AND ${alias}.frontmatter->>'visibility' = 'private')`;
   const { remotePolicy } = currentCallerAccess();
   const scoped = engineScopeStore.getStore();

@@ -42,7 +42,7 @@ import { authorizeWrite } from '../persistence/authority.ts';
 import { preparePageMutation } from '../persistence/page-prepare.ts';
 import { bumpAtomGeneration, managedAtomCompletedSql, managedAtomSession, publishManagedAtomGeneration, type AtomOrigin } from '../persistence/atom-maintenance.ts';
 import { atomGenerationAdapter, atomOwnerKey, readAtomInput } from '../generations/adapters/atoms.ts';
-import { atomOriginSlugSql } from '../persistence/atom-origin.ts';
+import { atomOriginSlugSql, atomOriginSourceSql } from '../persistence/atom-origin.ts';
 import { publishGeneration } from '../generations/publish.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
@@ -87,7 +87,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
              o.id AS origin_page_id, o.slug AS origin_live_slug, o.source_id AS origin_source_id,
              o.content_hash AS origin_hash, o.deleted_at IS NOT NULL AS origin_deleted
         FROM pages a
-        LEFT JOIN pages o ON o.source_id=a.source_id AND o.slug=${atomOriginSlugSql('a')}
+        LEFT JOIN pages o ON o.source_id=${atomOriginSourceSql('a')} AND o.slug=${atomOriginSlugSql('a')}
        WHERE a.source_id=ANY($1::text[]) AND a.type='atom' AND a.deleted_at IS NULL
          AND NULLIF(a.frontmatter->>'source_slug','') IS NOT NULL
          AND NULLIF(a.frontmatter->>'imported_from','') IS NULL
