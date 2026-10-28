@@ -20,8 +20,8 @@ import type { ExtractAtomsItem } from './extract-atoms-input.ts';
  * additively, stays provisional (`pending:<hash>`) and retires nothing. A held result changes nothing and is logged.
  */
 export async function publishUnmanagedAtoms(engine: BrainEngine, sourceId: string, item: ExtractAtomsItem, atoms: ReadonlyArray<{ slug: string; content: string }>,
-  links: LinkBatchInput[], opts: { partial: boolean; runId: string; originLabel: string }) {
-  const { key, context, locator } = atomGenerationOrigin(sourceId, item);
+  links: LinkBatchInput[], opts: { partial: boolean; runId: string; originLabel: string; readSourceId?: string }) {
+  const { key, context, locator } = atomGenerationOrigin(sourceId, item, opts.readSourceId);
   context.links = links;
   context.embed = isAvailable('embedding');
   const outcome = await publishGeneration(engine, atomGenerationAdapter, { key, items: atoms.map(atom => markdownItem(atom.slug, atom.content)),
@@ -41,10 +41,11 @@ export function atomInputPin(item: ExtractAtomsItem): string {
 /**
  * GBRA-161: the generation key of one item and the context its adapter reads (a transcript's input is not in the
  * database). A transcript's key is its root label and root-relative path (resolveTranscriptKeys), or its path when the
- * caller named no root.
+ * caller named no root. `sourceId` is the WRITE source (the ledger row lives with the atoms); `readSourceId` is passed only
+ * for a read/write split and goes into a page's owner key. Transcripts come from one brain-wide corpus, so theirs stays unqualified.
  */
-export function atomGenerationOrigin(sourceId: string, item: ExtractAtomsItem): { key: GenerationKey; context: AtomGenerationContext; locator?: string } {
-  if (item.kind === 'page') return { key: { kind: ATOM_KIND, sourceId, ownerKey: atomOwnerKey({ kind: 'page', slug: item.slug }) }, context: { postCommit: [] } };
+export function atomGenerationOrigin(sourceId: string, item: ExtractAtomsItem, readSourceId?: string): { key: GenerationKey; context: AtomGenerationContext; locator?: string } {
+  if (item.kind === 'page') return { key: { kind: ATOM_KIND, sourceId, ownerKey: atomOwnerKey({ kind: 'page', slug: item.slug, ...(readSourceId ? { readSourceId } : {}) }) }, context: { postCommit: [] } };
   return { key: { kind: ATOM_KIND, sourceId, ownerKey: atomOwnerKey({ kind: 'transcript', transcriptKey: item.transcriptKey ?? item.filePath }) }, locator: item.filePath,
     context: { postCommit: [], locator: item.filePath, transcriptInput: { pin: item.contentHash, size: Buffer.byteLength(item.content) } } };
 }

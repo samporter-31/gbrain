@@ -30,6 +30,7 @@
  */
 
 import type { BrainEngine } from '../engine.ts';
+import type { WriteSourceRefusalCode } from './extract-atoms-write-source.ts';
 import type { ExtractAtomsOpts } from './extract-atoms.ts';
 import { redactConnectionInfo } from '../audit/redact-connection-info.ts';
 import { redactFindings } from '../secret-scan.ts';
@@ -178,8 +179,13 @@ export const DRAIN_COUNT_TIMEOUT_MS = 60_000;
  */
 export const STRUCTURAL_REFUSAL_PREFIX = 'structural_refusal:';
 
-/** The non-retryable dead-letter text for a structural preflight refusal, or null for any other error. */
+/**
+ * The non-retryable dead-letter text for a structural preflight refusal, or null for any other error. A configured
+ * extract_atoms read/write split that cannot run (extract-atoms-write-source.ts) is one: it refuses before any spend
+ * and no retry can change it.
+ */
 export function structuralAtomRefusal(error: unknown): string | null {
+  if (error instanceof Error && error.name === 'ExtractAtomsWriteSourceError') return `${STRUCTURAL_REFUSAL_PREFIX} ${(error as Error & { code?: unknown }).code}: ${error.message}`;
   if (!(error instanceof Error) || error.name !== 'OperationError') return null;
   const code = (error as Error & { code?: unknown }).code;
   return code === 'owner_unavailable' || code === 'permission_denied' ? `${STRUCTURAL_REFUSAL_PREFIX} ${code}: ${error.message}` : null;
@@ -519,6 +525,7 @@ export async function runExtractAtomsDrainForSource(
   const { countExtractAtomsBacklog } = await import('./extract-atoms.ts');
   const { runPhaseExtractAtomsStamped } = await import('./extract-atoms-stamp.ts');
   const { cycleLockIdFor } = await import('../cycle.ts');
+  const { ExtractAtomsWriteSourceError } = await import('./extract-atoms-write-source.ts');
 
   const { MaintenanceWriteWait } = await import('../persistence/maintenance-wait.ts');
 
@@ -541,6 +548,10 @@ export async function runExtractAtomsDrainForSource(
           attempt,
         });
         const d = (r.details ?? {}) as Record<string, unknown>;
+        // A configured read/write split the phase refused: stop the drain with the refusal, never a quiet zero-progress batch.
+        if (r.error?.class === 'ExtractAtomsWriteSource') {
+          throw new ExtractAtomsWriteSourceError(r.error.code as WriteSourceRefusalCode, r.error.message, extractionSourceId, String(d.write_source_id ?? ''));
+        }
         // issue #3218: `r.status` collapses to 'warn' whether ONE item failed
         // (partial success — leave the drain's existing ok/no_progress path
         // alone) or EVERY item failed (a total provider outage the drain

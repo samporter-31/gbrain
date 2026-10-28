@@ -99,6 +99,7 @@ import { atomGenerationOrigin, atomInputPin, heldLine, publishUnmanagedAtoms, re
 import { heldForInput } from '../generations/publish.ts';
 import { ATOM_TYPES, ATOMS_RESPONSE_SCHEMA } from './extract-atoms-schema.ts';
 import { parseAtomsOutcome } from './extract-atoms-parse.ts';
+import { configuredWriteSource, ExtractAtomsWriteSourceError, resolveExtractAtomsSources, SOURCE_PAGE_SOURCE_ID_KEY, writeSourceRefusalResult, writeSourceSql } from './extract-atoms-write-source.ts';
 export { parseAtomsOutcome, parseAtomsResponse, type AtomsParseOutcome } from './extract-atoms-parse.ts';
 
 const DEFAULT_BUDGET_USD = 0.3;
@@ -404,6 +405,8 @@ export async function discoverExtractablePages(
   sourceId: string,
   affectedSlugs?: string[],
   limit: number = PAGE_DISCOVERY_BUDGET,
+  /** Where a page's atoms live (the read/write split); defaults to `sourceId`, which keeps the query unchanged. */
+  writeSourceId: string = sourceId,
 ): Promise<AtomPageInput[]> {
   const hasFilter = Array.isArray(affectedSlugs) && affectedSlugs.length > 0;
   const connectorExclusion = await connectorAtomExclusionSql(engine);
@@ -430,7 +433,7 @@ export async function discoverExtractablePages(
         SELECT 1
         FROM pages atom
         WHERE atom.type = 'atom'
-          AND atom.source_id = $1
+          AND atom.source_id = ${writeSourceId === sourceId ? '$1' : `$${hasFilter ? 6 : 5}`}
           AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
           AND COALESCE(atom.frontmatter->>'managed_extraction', '') <> 'true'
           AND atom.deleted_at IS NULL
@@ -445,6 +448,7 @@ export async function discoverExtractablePages(
     limit,
   ];
   if (hasFilter) params.push(affectedSlugs);
+  if (writeSourceId !== sourceId) params.push(writeSourceId);
 
   try {
     const rows = await engine.executeRaw<{
@@ -496,10 +500,13 @@ export async function countExtractAtomsBacklog(
   try {
     // Two modes: scoped (the phase's per-source `remaining`) vs brain-wide
     // (doctor — matches the conversation-facts check's cross-source posture).
-    // The atom must live in the SAME source as the page either way, so the
-    // brain-wide form keys the NOT EXISTS on `atom.source_id = p.source_id`.
+    // The atom must live in the page source's write source either way (the page's own unless
+    // `extract_atoms_write_source` says otherwise), so the brain-wide form resolves it per page row.
     const scoped = sourceId !== undefined;
     const connectorExclusion = await connectorAtomExclusionSql(engine);
+    // The read/write split: the atom lives in the page source's configured write source (default: the page's own).
+    const writeSourceId = scoped ? await configuredWriteSource(engine, sourceId) : undefined;
+    const splitScoped = scoped && writeSourceId !== sourceId;
     const sql = scoped
       ? `SELECT COUNT(*) AS cnt FROM pages p
          WHERE p.source_id = $1
@@ -515,7 +522,7 @@ export async function countExtractAtomsBacklog(
            ${connectorExclusion}
            AND NOT EXISTS (
              SELECT 1 FROM pages atom
-             WHERE atom.type = 'atom' AND atom.source_id = $1
+             WHERE atom.type = 'atom' AND atom.source_id = ${splitScoped ? '$5' : '$1'}
                AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
                AND COALESCE(atom.frontmatter->>'managed_extraction', '') <> 'true'
                AND atom.deleted_at IS NULL
@@ -533,7 +540,7 @@ export async function countExtractAtomsBacklog(
            ${connectorExclusion}
            AND NOT EXISTS (
              SELECT 1 FROM pages atom
-             WHERE atom.type = 'atom' AND atom.source_id = p.source_id
+             WHERE atom.type = 'atom' AND atom.source_id = ${writeSourceSql('p')}
                AND atom.frontmatter->>'source_hash' = substring(p.content_hash from 1 for 16)
                AND COALESCE(atom.frontmatter->>'managed_extraction', '') <> 'true'
                AND atom.deleted_at IS NULL
@@ -541,7 +548,7 @@ export async function countExtractAtomsBacklog(
     const extractableTypes = await resolveExtractableTypes();
     const maxInputChars = await resolveExtractAtomsInputCap(engine);
     const params = scoped
-      ? [sourceId, extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION, maxInputChars]
+      ? [sourceId, extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION, maxInputChars, ...(splitScoped ? [writeSourceId] : [])]
       : [extractableTypes, MIN_PAGE_CHARS_FOR_EXTRACTION, maxInputChars];
     const rows = await engine.executeRaw<{ cnt: string | number }>(sql, params, { signal: opts.signal });
     return Number(rows[0]?.cnt ?? 0);
@@ -702,11 +709,22 @@ export async function runPhaseExtractAtoms(
   engine: BrainEngine,
   opts: ExtractAtomsOpts = {},
 ): Promise<PhaseResult> {
+  // `sourceId` is the READ source: where pages are discovered and where scan state, failure streaks and watermarks are keyed.
+  // `writeSourceId` is where atoms, receipts and generation-ledger rows go. They differ only when the source's
+  // `extract_atoms_write_source` config says so (extract-atoms-write-source.ts); unset, they are the same value.
   const sourceId = opts.sourceId ?? 'default';
+  let writeSourceId = sourceId;
+  try {
+    writeSourceId = (await resolveExtractAtomsSources(engine, sourceId)).writeSourceId;
+  } catch (err) {
+    if (!(err instanceof ExtractAtomsWriteSourceError)) throw err;
+    return writeSourceRefusalResult(err, opts.dryRun ?? false);
+  }
+  const split = writeSourceId !== sourceId;
   const chat = opts._chat ?? gatewayChat;
   const managed = await managedAtomSession(engine, sourceId, opts._managedRetry, opts.attempt?.writeWait);
   if (managed && !opts.dryRun) await resumeManagedGenerationMembers(engine, managed); // GBRA-161 PR 1b: finish what a crash after an activation left
-  const atomFiles = await derivedWriteThrough(engine, 'extract_atoms', sourceId, { managed: managed !== null, dryRun: opts.dryRun ?? false });
+  const atomFiles = await derivedWriteThrough(engine, 'extract_atoms', writeSourceId, { managed: managed !== null, dryRun: opts.dryRun ?? false });
   const writeRequests: WriteReceipt[] = [];
   const pageAtomTitles = new Map<string, Map<string, string[]>>();
 
@@ -768,20 +786,21 @@ export async function runPhaseExtractAtoms(
       sourceId,
       opts.affectedSlugs,
       await resolvePageDiscoveryLimit(engine),
+      writeSourceId,
     );
   }
 
   // 2. Apply transcript-side source-hash idempotency in ONE batch query
   //    instead of N per-hash round trips. Page-side idempotency lives in
   //    the discovery SQL's NOT EXISTS subquery (already batched).
-  const transcriptKeys = await resolveTranscriptKeys(engine, sourceId, transcripts, opts.dryRun === true);
+  const transcriptKeys = await resolveTranscriptKeys(engine, writeSourceId, transcripts, opts.dryRun === true);
   const transcriptsLive: typeof transcripts = [];
   let duplicatesSkipped = 0;
   const allHashes16 = transcripts.map(t => t.contentHash.slice(0, 16));
   // Surface a heartbeat before the batch query so even an instant
   // short-circuit shows a sign of life (closes Issue 2 silent-phase pain).
   opts.progress?.heartbeat(`checking existing atoms for ${allHashes16.length} transcripts`);
-  const existingHashes = await atomsExistingForHashes(engine, sourceId, allHashes16);
+  const existingHashes = await atomsExistingForHashes(engine, writeSourceId, allHashes16);
   const tombstonedTranscriptKeys = await tombstonedTranscriptsForHashes(
     engine,
     sourceId,
@@ -880,6 +899,7 @@ export async function runPhaseExtractAtoms(
       details: {
         reason: 'no_work',
         source_id: sourceId,
+        ...(split ? { write_source_id: writeSourceId } : {}),
         atoms_extracted: 0,
         transcripts_processed: 0,
         transcripts_total: 0,
@@ -1110,7 +1130,7 @@ export async function runPhaseExtractAtoms(
       if (resumed === 'done') { duplicatesSkipped++; continue; }
       if (resumed === 'held') { heldFailed++; continue; } // #6325: settled after repeated failures; doctor lists it
       // GBRA-161: a complete read whose result for this same input and policy is already held is not computed again.
-      if (!opts.dryRun && !truncated && await heldForInput(engine, atomGenerationOrigin(sourceId, item).key, origin ? atomOriginPin(origin) : atomInputPin(item))) { duplicatesSkipped++; continue; }
+      if (!opts.dryRun && !truncated && await heldForInput(engine, atomGenerationOrigin(writeSourceId, item, split ? sourceId : undefined).key, origin ? atomOriginPin(origin) : atomInputPin(item))) { duplicatesSkipped++; continue; }
       const cutLine = truncated ? inputTruncatedLine(originLabel, input, maxInputChars) : null; // A7: a complete appended-tail read prints nothing
       if (cutLine) { inputTruncated++; console.error(cutLine); } // counted only for a model call
 
@@ -1198,17 +1218,17 @@ export async function runPhaseExtractAtoms(
           const srcRef = item.kind === 'transcript' ? item.filePath : item.slug;
           const slug =
             item.kind === 'page'
-              ? await resolvePageAtomSlug(engine, atom.title, item.slug, sourceId, undatedDate, pageAtomTitles)
-              : await resolveTranscriptAtomSlug(engine, sourceId, atom.title, item, undatedDate, atomSlug);
+              ? await resolvePageAtomSlug(engine, atom.title, item.slug, writeSourceId, undatedDate, pageAtomTitles)
+              : await resolveTranscriptAtomSlug(engine, writeSourceId, atom.title, item, undatedDate, atomSlug);
           if (importedSlugs.includes(slug)) continue; // #7514: a repeated title is one atom; a second item at its slug cannot publish
           const originFrontmatter =
             item.kind === 'transcript'
               ? { source_path: item.filePath }
-              : { source_slug: item.slug };
+              : { source_slug: item.slug, ...(split ? { [SOURCE_PAGE_SOURCE_ID_KEY]: sourceId } : {}) };
           // #4733 fail-closed: never let the upsert repoint an atom that is
           // bound to a DIFFERENT source page (pre-#4733 rows / hash collision).
           if (item.kind === 'page') {
-            await assertAtomImportBinding(engine, slug, sourceId, item.slug);
+            await assertAtomImportBinding(engine, slug, writeSourceId, item.slug, split ? sourceId : undefined);
           }
           // #4706: pin the quote to its origin, or don't claim one. Located:
           // store the ORIGINAL characters (not the model's rendering, so
@@ -1271,7 +1291,7 @@ export async function runPhaseExtractAtoms(
               to_slug: slug,
               link_source: 'atom-provenance',
               from_source_id: sourceId,
-              to_source_id: sourceId,
+              to_source_id: writeSourceId,
             });
           } else if (transcriptPageIndex && resolveTranscriptPages) {
             // A split session renders one page per part, all sharing a
@@ -1283,7 +1303,7 @@ export async function runPhaseExtractAtoms(
                 to_slug: slug,
                 link_source: 'atom-provenance',
                 from_source_id: sourceId,
-                to_source_id: sourceId,
+                to_source_id: writeSourceId,
               });
             }
           }
@@ -1310,7 +1330,7 @@ export async function runPhaseExtractAtoms(
           await commitAtomsWatermark(item, input, published);
         } else {
         throwIfAborted(opts.signal, 'extract_atoms');
-        const outcome = await publishUnmanagedAtoms(engine, sourceId, item, unmanagedAtoms, provenanceLinks, { partial: truncated, runId, originLabel });
+        const outcome = await publishUnmanagedAtoms(engine, writeSourceId, item, unmanagedAtoms, provenanceLinks, { partial: truncated, runId, originLabel, ...(split ? { readSourceId: sourceId } : {}) });
         if (outcome.state === 'held') continue;
         await atomFiles?.write(unmanagedAtoms.map(atom => atom.slug), outcome.retired);
         if (truncated) await recordPartialDisposition(engine, sourceId, item, maxInputChars);
@@ -1391,6 +1411,7 @@ export async function runPhaseExtractAtoms(
       await writeReceipt(engine, {
         kind: 'atoms',
         source_id: sourceId,
+        ...(split ? { target_source_id: writeSourceId } : {}),
         run_id: runId,
         round: 'single',
         extracted_at: new Date().toISOString(),
@@ -1464,6 +1485,7 @@ export async function runPhaseExtractAtoms(
       model: extractModel,
       budget_exhausted: budgetExhausted,
       source_id: sourceId,
+      ...(split ? { write_source_id: writeSourceId } : {}),
       dry_run: opts.dryRun ?? false,
     },
   }, atomFiles?.held, 'atom');
@@ -1607,9 +1629,20 @@ async function assertAtomImportBinding(
   slug: string,
   sourceId: string,
   expectedSourceSlug: string,
+  /** Set for a read/write split: the source the origin page is read from. */
+  readSourceId?: string,
 ): Promise<void> {
   const existing = await engine.getPage(slug, { sourceId });
   if (!existing) return;
+  // A split target can hold atoms of several read sources whose pages share a slug: an atom stamped with another
+  // read source is bound elsewhere, even though its source_slug matches. Fail closed, never merge them.
+  const stampedRead = existing.frontmatter?.[SOURCE_PAGE_SOURCE_ID_KEY];
+  if (readSourceId && typeof stampedRead === 'string' && stampedRead !== readSourceId) {
+    throw new Error(
+      `atom identity conflict for ${slug}: existing atom was extracted from source ${stampedRead}, not ${readSourceId}; ` +
+      'refusing to overwrite it',
+    );
+  }
   // A pre-binding-era atom (no source_slug/source_path at all) is not bound
   // to a different source — claiming it is the legacy-adoption upsert path
   // (resolvePageAtomSlug), not a clobber. Anything that is not an atom (a

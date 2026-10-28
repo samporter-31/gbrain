@@ -83,7 +83,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
              o.id AS origin_page_id, o.slug AS origin_live_slug, o.source_id AS origin_source_id,
              o.content_hash AS origin_hash, o.deleted_at IS NOT NULL AS origin_deleted
         FROM pages a
-        LEFT JOIN pages o ON o.source_id=a.source_id AND o.slug=a.frontmatter->>'source_slug'
+        LEFT JOIN pages o ON o.source_id=COALESCE(NULLIF(a.frontmatter->>'source_page_source_id',''), a.source_id) AND o.slug=a.frontmatter->>'source_slug'
        WHERE a.source_id=ANY($1::text[]) AND a.type='atom' AND a.deleted_at IS NULL
          AND NULLIF(a.frontmatter->>'source_slug','') IS NOT NULL
          AND NULLIF(a.frontmatter->>'imported_from','') IS NULL

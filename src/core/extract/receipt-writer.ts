@@ -59,8 +59,13 @@ export type ExtractReceiptRound =
 export interface ExtractReceiptInput {
   /** Kind of extraction (matches the conceptual handler name). */
   kind: string;
-  /** Brain source the extraction targeted. */
+  /** Brain source the extraction targeted. This is the provenance label: it names the receipt (slug, title, body, `source_id`). */
   source_id: string;
+  /**
+   * Source the receipt PAGE is written into, when that is not `source_id` (an extract_atoms read/write split writes
+   * atoms and receipts into another partition than the one it read). Unset: the page lives in `source_id`.
+   */
+  target_source_id?: string;
   /** Op-checkpoint id or progressive-batch operation_id for trace continuity. */
   run_id: string;
   /** Which round this receipt covers. */
@@ -181,6 +186,7 @@ function buildReceiptFrontmatter(input: ExtractReceiptInput): Record<string, unk
     total_rows: input.total_rows,
     cost_usd: input.cost_usd,
   };
+  if (input.target_source_id && input.target_source_id !== input.source_id) fm.written_to_source_id = input.target_source_id;
   if (input.model_id) fm.model_id = input.model_id;
   if (typeof input.eval_pass === 'boolean') fm.eval_pass = input.eval_pass;
   if (typeof input.eval_score === 'number') fm.eval_score = input.eval_score;
@@ -217,7 +223,7 @@ export async function writeReceipt(
       compiled_truth,
       frontmatter,
     },
-    { sourceId: input.source_id },
+    { sourceId: input.target_source_id ?? input.source_id },
   ));
 
   // #4009: receipts are audit artifacts — deliberately never run through
@@ -228,7 +234,7 @@ export async function writeReceipt(
   // NOT permanent: a reindex that takes the DB fallback clears the stamp
   // and it recurs per receipt — the doctor check also excludes
   // type='extract_receipt' from mode_null (belt+braces).
-  await engine.updatePageContextualRetrievalState(slug, input.source_id, 'none', null);
+  await engine.updatePageContextualRetrievalState(slug, input.target_source_id ?? input.source_id, 'none', null);
 
   return { slug, page };
 }

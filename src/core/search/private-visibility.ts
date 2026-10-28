@@ -105,7 +105,7 @@ export function privateSnapshotFilterFragment(alias: string): string {
  * `gbrain repair visibility` then stamps the stricter value on the rows.
  */
 function derivedOriginPrivateSql(p: string): string {
-  const privateOrigin = (atom: string, alias: string) => `EXISTS (SELECT 1 FROM pages ${alias} WHERE ${alias}.source_id = ${atom}.source_id
+  const privateOrigin = (atom: string, alias: string) => `EXISTS (SELECT 1 FROM pages ${alias} WHERE ${alias}.source_id = COALESCE(NULLIF(${atom}.frontmatter->>'source_page_source_id', ''), ${atom}.source_id)
       AND ${alias}.slug = ${atom}.frontmatter->>'source_slug' AND ${alias}.frontmatter->>'visibility' = 'private')`;
   return `(CASE WHEN ${p}.type = 'atom' THEN ${privateOrigin(p, 'derived_origin')}
     WHEN ${derivedPageSql(p)} THEN EXISTS (SELECT 1 FROM links derived_input_link
