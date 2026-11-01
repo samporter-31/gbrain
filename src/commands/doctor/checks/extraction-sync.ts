@@ -834,7 +834,7 @@ export async function computeAtomProvenanceDriftCheck(
       // parsing can never throw (semantically-invalid dates become NaN →
       // metric omitted, verdict untouched).
       `WITH atom AS (
-         SELECT a.source_id,
+         SELECT a.source_id, COALESCE(NULLIF(a.frontmatter->>'source_page_source_id', ''), a.source_id) AS origin_source_id, -- origin's source (read/write split)
                 -- managed atoms keep their provisional prefix for good (#5770)
                 CASE WHEN a.frontmatter->>'managed_extraction' = 'true'
                      THEN regexp_replace(a.frontmatter->>'source_hash', '^pending:', '')
@@ -869,8 +869,8 @@ export async function computeAtomProvenanceDriftCheck(
                 (atom.ss IS NOT NULL AND h.sh IS NULL) AS drifted,
                 (s.slug IS NOT NULL) AS src_alive
            FROM atom
-           LEFT JOIN live_hashes h ON h.source_id = atom.source_id AND h.sh = atom.sh
-           LEFT JOIN live_slugs  s ON s.source_id = atom.source_id AND s.slug = atom.ss
+           LEFT JOIN live_hashes h ON h.source_id = atom.origin_source_id AND h.sh = atom.sh
+           LEFT JOIN live_slugs  s ON s.source_id = atom.origin_source_id AND s.slug = atom.ss
        )
        SELECT count(*) FILTER (WHERE ss IS NOT NULL) AS total,
               count(*) FILTER (WHERE ss IS NULL) AS slug_unbound,

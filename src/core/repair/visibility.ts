@@ -99,7 +99,7 @@ async function planLineage(engine: BrainEngine, sourceIds: string[], only?: { id
   const atoms = atomIds?.length === 0 ? [] : await engine.executeRaw<AtomRow>(`SELECT a.id,a.source_id,a.slug,a.type,a.frontmatter->>'visibility' AS visibility,
       length(a.compiled_truth) AS chars, a.frontmatter->>'source_slug' AS source_slug,
       o.id AS origin_id,o.type AS origin_type,o.frontmatter AS origin_frontmatter
-    FROM pages a LEFT JOIN pages o ON o.source_id=a.source_id AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL
+    FROM pages a LEFT JOIN pages o ON o.source_id=COALESCE(NULLIF(a.frontmatter->>'source_page_source_id',''), a.source_id) AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL
     WHERE a.type='atom' AND a.deleted_at IS NULL AND a.source_id=ANY($1::text[])
       AND ($2::integer[] IS NULL OR a.id=ANY($2::integer[])) ORDER BY a.id`, [sourceIds, atomIds], bounded);
 

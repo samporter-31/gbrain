@@ -12,6 +12,9 @@ import { runExtractAtomsDrainForSource, structuralAtomRefusal } from '../src/cor
 import { configuredWriteSource, EXTRACT_ATOMS_WRITE_SOURCE_KEY, ExtractAtomsWriteSourceError, resolveExtractAtomsSources } from '../src/core/cycle/extract-atoms-write-source.ts';
 import { atomOwnerKey } from '../src/core/generations/adapters/atoms.ts';
 import { staleAtomsRepair } from '../src/core/repair/stale-atoms.ts';
+import { planVisibilityRepair } from '../src/core/repair/visibility.ts';
+import { derivedVisibilityCheck } from '../src/commands/doctor/checks/derived-visibility.ts';
+import { computeAtomProvenanceDriftCheck } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { privatePagesFilterFragment } from '../src/core/search/private-visibility.ts';
 import type { ChatResult } from '../src/core/ai/gateway.ts';
 
@@ -322,5 +325,62 @@ describe('the other places that assume an atom\'s origin page is in the atom\'s 
     expect((await visible()).length).toBe(2);
     await engine.executeRaw("UPDATE pages SET frontmatter = frontmatter || '{\"visibility\":\"private\"}'::jsonb WHERE source_id = 'wiki' AND slug = $1", [slug]);
     expect(await visible()).toEqual([]);
+  });
+
+  // Codex review 2026-10-31 (findings 1-3): maintenance paths that looked for the origin page in the atom's own source.
+  const setVisibility = async (sourceId: string, where: string, visibility: string, params: unknown[] = []) =>
+    engine.executeRaw(`UPDATE pages SET frontmatter = frontmatter || jsonb_build_object('visibility', '${visibility}'::text) WHERE source_id = '${sourceId}' AND ${where}`, params);
+  const worldOriginWorldAtoms = async () => {
+    await setVisibility('wiki', 'slug = $1', 'world', [slug]);
+    await setVisibility('derived', "type = 'atom'", 'world');
+  };
+
+  test('visibility repair does not tighten a world derived atom whose world origin is in the read source (finding 2)', async () => {
+    await worldOriginWorldAtoms();
+    expect((await planVisibilityRepair(engine, ['derived'])).changes).toEqual([]);
+  });
+
+  test('...and does tighten it once that read-source origin turns private (the join is not blind)', async () => {
+    await worldOriginWorldAtoms();
+    await setVisibility('wiki', 'slug = $1', 'private', [slug]);
+    const { changes } = await planVisibilityRepair(engine, ['derived']);
+    expect(changes.length).toBe(2);
+    expect(changes.every(change => change.source_id === 'derived' && change.to === 'private')).toBe(true);
+  });
+
+  test('derived_visibility doctor counts no looser atoms for a world origin in the read source (finding 2)', async () => {
+    await worldOriginWorldAtoms();
+    const check = await derivedVisibilityCheck(engine, 'derived');
+    expect(check.details).toMatchObject({ looser_atoms: 0, unstamped_atoms: 0 });
+  });
+
+  test('atom_provenance_drift does not report a split atom as drifted or source-gone (finding 3)', async () => {
+    const check = await computeAtomProvenanceDriftCheck(engine);
+    expect(check.details).toMatchObject({ total_atoms: 2, drifted: 0, source_gone: 0 });
+  });
+
+  test('...and still reports it source-gone once the read-source page is deleted', async () => {
+    await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE source_id = 'wiki' AND slug = $1", [slug]);
+    const check = await computeAtomProvenanceDriftCheck(engine);
+    expect(check.details).toMatchObject({ total_atoms: 2, drifted: 2, source_gone: 2 });
+  });
+
+  test('stale-atoms apply retires a split atom under its qualified owner key and makes no second ledger lineage (finding 1)', async () => {
+    await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE source_id = 'wiki' AND slug = $1", [slug]);
+    const scope = { source_ids: ['derived'] } as never;
+    const preview = await staleAtomsRepair.plan(engine, scope, null, { apply: false });
+    expect(preview.items.length).toBe(2);
+    const approved = await staleAtomsRepair.plan(engine, scope, null, { apply: true, expect: preview.preview_hash });
+    const outcomes = [];
+    for (const entry of approved.items) outcomes.push(await staleAtomsRepair.apply({ engine } as never, entry));
+    expect(outcomes.map(outcome => (outcome as { outcome: string }).outcome)).toEqual(['retired', 'retired']);
+    expect(await liveAtoms('derived')).toEqual([]);
+    expect((await ledger()).every(row => row.owner_key === `source_slug@wiki:${slug}`)).toBe(true);
+  });
+
+  test('stale-atoms preview carries the origin source, so an apply under it is bound to the read source (finding 1)', async () => {
+    await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE source_id = 'wiki' AND slug = $1", [slug]);
+    const { items } = await staleAtomsRepair.plan(engine, { source_ids: ['derived'] } as never, null, { apply: false });
+    expect(items.every(entry => (entry as unknown as { atom: { origin_source_id: string } }).atom.origin_source_id === 'wiki')).toBe(true);
   });
 });

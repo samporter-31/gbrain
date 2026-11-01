@@ -59,6 +59,8 @@ export interface StaleAtom {
   class: StaleAtomClass;
   managed: boolean;
   origin_slug: string;
+  /** The source the origin page lives in: the atom's own source unless extract_atoms read/write split them. */
+  origin_source_id: string;
   origin_page_id: number | null;
   origin_hash: string | null;
   /** Class (b): the completed-extraction evidence at the origin's current hash. */
@@ -80,7 +82,8 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
              COALESCE(a.frontmatter->>'managed_extraction','')='true' AS managed,
              regexp_replace(COALESCE(a.frontmatter->>'source_hash',''),'^pending:','') AS atom_hash,
              length(COALESCE(a.compiled_truth,'')) AS chars,
-             o.id AS origin_page_id, o.slug AS origin_live_slug, o.source_id AS origin_source_id,
+             o.id AS origin_page_id, o.slug AS origin_live_slug,
+             COALESCE(NULLIF(a.frontmatter->>'source_page_source_id',''), a.source_id) AS origin_source_id,
              o.content_hash AS origin_hash, o.deleted_at IS NOT NULL AS origin_deleted
         FROM pages a
         LEFT JOIN pages o ON o.source_id=COALESCE(NULLIF(a.frontmatter->>'source_page_source_id',''), a.source_id) AND o.slug=a.frontmatter->>'source_slug'
@@ -105,7 +108,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
         END AS completion
         FROM atom
     )
-    SELECT id, source_id, incarnation, slug, revision, class, managed, origin_slug,
+    SELECT id, source_id, incarnation, slug, revision, class, managed, origin_slug, origin_source_id,
            origin_page_id,
            CASE WHEN class='origin_gone' THEN NULL ELSE origin_hash END AS origin_hash,
            CASE WHEN class='origin_gone' THEN NULL ELSE completion END AS evidence, chars
@@ -117,7 +120,7 @@ async function staleAtoms(db: BrainEngine, sourceIds: string[], atomId?: number)
 }
 
 function sameAtom(live: StaleAtom | undefined, approved: StaleAtom): boolean {
-  return !!live && (['id', 'source_id', 'incarnation', 'slug', 'revision', 'class', 'managed', 'origin_slug', 'origin_page_id', 'origin_hash', 'evidence'] as const)
+  return !!live && (['id', 'source_id', 'incarnation', 'slug', 'revision', 'class', 'managed', 'origin_slug', 'origin_source_id', 'origin_page_id', 'origin_hash', 'evidence'] as const)
     .every(field => live[field] === approved[field]);
 }
 
@@ -177,7 +180,9 @@ async function retireStaleAtom(ctx: OperationContext, atom: StaleAtom): Promise<
   if (!sameAtom((await staleAtoms(engine, [atom.source_id], atom.id))[0], atom)) return changed('the atom or its source page changed');
   // GBRA-161 PR 1b: the retirement is an approved generation of the atom's origin key (no floor or valve), bound to the
   // atom's identity now; the primitive rechecks it live, owned and unedited under the origin and atom locks.
-  const key = { kind: atomGenerationAdapter.kind, sourceId: atom.source_id, ownerKey: atomOwnerKey({ kind: 'page', slug: atom.origin_slug }) };
+  // A split atom (origin in another source than the atom) is owned under the qualified key extraction wrote it with.
+  const readSourceId = atom.origin_source_id !== atom.source_id ? atom.origin_source_id : undefined;
+  const key = { kind: atomGenerationAdapter.kind, sourceId: atom.source_id, ownerKey: atomOwnerKey({ kind: 'page', slug: atom.origin_slug, readSourceId }) };
   const row = (await atomGenerationAdapter.readItems(engine, key, [atom.slug])).get(atom.slug);
   if (!row?.live) return changed('the atom was removed');
   const approved = { retire: [atom.slug], retiredBy: STALE_ATOMS_RETIRED_BY, expect: { [atom.slug]: row.identityHash } } as const;
@@ -208,8 +213,11 @@ async function stampRetirement(tx: BrainEngine, atom: StaleAtom, stamp = true): 
   if (stamp) await tx.executeRaw(`UPDATE pages SET frontmatter=frontmatter||jsonb_build_object('retired_by',$1::text,'retired_at',$2::text)
     WHERE id=$3 AND source_id=$4 AND deleted_at IS NOT NULL`, [STALE_ATOMS_RETIRED_BY, new Date().toISOString(), atom.id, atom.source_id]);
   if (atom.origin_page_id === null) return;
-  const [{ incarnation }] = await tx.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [atom.source_id]);
-  await bumpAtomGeneration(tx, atom.source_id, incarnation, atom.origin_page_id, atom.class === 'origin_changed' ? atom.origin_hash : null);
+  // Scan state and extraction checkpoints belong to the origin page's source, which differs from the atom's for a split atom
+  // (a request journaled before the split existed carries no origin_source_id).
+  const originSourceId = atom.origin_source_id ?? atom.source_id;
+  const [{ incarnation }] = await tx.executeRaw<{ incarnation: string }>('SELECT incarnation::text AS incarnation FROM sources WHERE id=$1', [originSourceId]);
+  await bumpAtomGeneration(tx, originSourceId, incarnation, atom.origin_page_id, atom.class === 'origin_changed' ? atom.origin_hash : null);
 }
 
 /** Preparer for `managed_maintenance_retire_stale_atoms`: rechecks the atom's class under its and its origin's page locks, then retires it. */
@@ -233,7 +241,7 @@ export async function prepareStaleAtomRetirement(engine: BrainEngine, row: Write
   await unchanged(engine);
   await authorizeWrite(engine, row.authority, 'delete_page', row.slug);
   const page = await preparePageMutation(engine, { ...row, operation: 'delete_page' }, config, undefined, undefined, { allowMissingFile: true });
-  return { ...page, additionalPageKeys: [...(page.additionalPageKeys ?? []), { sourceId: row.source_id, slug: atom.origin_slug }],
+  return { ...page, additionalPageKeys: [...(page.additionalPageKeys ?? []), { sourceId: atom.origin_source_id ?? row.source_id, slug: atom.origin_slug }],
     validate: async tx => { await page.validate?.(tx); await authorizeWrite(tx, row.authority, 'delete_page', row.slug); await unchanged(tx); },
     apply: async tx => {
       const outcome = await page.apply(tx);
