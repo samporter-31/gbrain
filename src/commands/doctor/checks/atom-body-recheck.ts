@@ -11,6 +11,8 @@ import type { BodyStorage } from '../../../core/page-body/types.ts';
 /** The page-bound and slug-unbound atoms atom_provenance_drift reads (`ss` NULL: slug-unbound), as a CTE body. */
 export const ATOM_PROVENANCE_CTE = `atom AS (
          SELECT a.source_id,
+                -- the origin page's source: the atom's own unless extract_atoms read/write split them
+                COALESCE(NULLIF(a.frontmatter->>'source_page_source_id', ''), a.source_id) AS origin_source_id,
                 -- managed atoms keep their provisional prefix for good (#5770)
                 CASE WHEN a.frontmatter->>'managed_extraction' = 'true'
                      THEN regexp_replace(a.frontmatter->>'source_hash', '^pending:', '')
@@ -48,8 +50,8 @@ export async function unchangedBodyAtoms(engine: BrainEngine): Promise<number> {
      )
      SELECT p.id AS page_id, atom.sh, count(*)::int AS n
        FROM atom
-       JOIN pages p ON p.source_id = atom.source_id AND p.slug = atom.ss AND p.deleted_at IS NULL AND p.body_storage = 'inline'
-       LEFT JOIN live_hashes h ON h.source_id = atom.source_id AND h.sh = atom.sh
+       JOIN pages p ON p.source_id = atom.origin_source_id AND p.slug = atom.ss AND p.deleted_at IS NULL AND p.body_storage = 'inline'
+       LEFT JOIN live_hashes h ON h.source_id = atom.origin_source_id AND h.sh = atom.sh
       WHERE h.sh IS NULL AND length(atom.sh) = 16
       GROUP BY p.id, atom.sh ORDER BY p.id, atom.sh LIMIT ${BODY_RECHECK_GROUPS}`, []);
   const json = <T>(v: unknown): T => (typeof v === 'string' ? JSON.parse(v) : v) as T;
