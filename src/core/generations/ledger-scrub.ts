@@ -24,9 +24,15 @@ export async function scrubGenerationLedger(tx: BrainEngine, sourceId: string, t
     const held = await tx.executeRaw(`UPDATE derived_generations SET proposal=NULL, updated_at=now()
       WHERE source_id=$1 AND proposal IS NOT NULL AND (right(owner_key, length($2) + 1) = ':' || $2 OR proposal @> jsonb_build_array(jsonb_build_object('key', $2::text)))
       RETURNING 1`, [sourceId, target.slug]);
+    // An extract_atoms read/write split (sources.config.extract_atoms_write_source) keeps the atom generation of a page
+    // read from `sourceId` in the WRITE source, under owner key `source_slug@<read source>:<slug>` (adapters/atoms.ts
+    // atomOwnerKey). Its held proposal carries this page's text, so it is scrubbed wherever it lives.
+    const splitHeld = await tx.executeRaw(`UPDATE derived_generations SET proposal=NULL, updated_at=now()
+      WHERE source_id<>$1 AND kind='atom' AND proposal IS NOT NULL AND owner_key='source_slug@' || $1::text || ':' || $2::text
+      RETURNING 1`, [sourceId, target.slug]);
     const fences = await tx.executeRaw(`UPDATE derived_generations SET completeness=completeness - 'fence'::text, updated_at=now()
       WHERE source_id=$1 AND owner_key='page:' || $2::text AND completeness->'fence' IS NOT NULL RETURNING 1`, [sourceId, target.slug]);
-    return { derived_generation_items: items.length, derived_generations: fenceHolds.length + held.length + fences.length };
+    return { derived_generation_items: items.length, derived_generations: fenceHolds.length + held.length + splitHeld.length + fences.length };
   }
   const needles = target.needles.filter(Boolean).flatMap(needle => [needle.toLowerCase(), JSON.stringify(needle).slice(1, -1).toLowerCase()]);
   if (!needles.length) return { derived_generation_items: 0, derived_generations: 0 };

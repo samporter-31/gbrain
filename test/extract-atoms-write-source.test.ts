@@ -17,6 +17,7 @@ import { derivedVisibilityCheck } from '../src/commands/doctor/checks/derived-vi
 import { computeAtomProvenanceDriftCheck } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { privatePagesFilterFragment } from '../src/core/search/private-visibility.ts';
 import { findAtomFenceRows } from '../src/core/repair/atom-fence-rows.ts';
+import { scrubGenerationLedger } from '../src/core/generations/ledger-scrub.ts';
 import { STORAGE_ROLE } from '../src/core/storage-manifest/door.ts';
 import { PRIVATE_ROW, WORLD_PAGE_BODY } from './helpers/world-fence-page.ts';
 import type { ChatResult } from '../src/core/ai/gateway.ts';
@@ -391,6 +392,20 @@ describe('the other places that assume an atom\'s origin page is in the atom\'s 
     const { atoms } = await findAtomFenceRows(engine, ['derived']);
     expect(atoms.map(atom => ({ slug: atom.slug, source_id: atom.source_id, origin_slug: atom.origin_slug }))).toEqual([
       { slug: 'atoms/2026-01-01/renewal-terms', source_id: 'derived', origin_slug: origin }]);
+  });
+
+  test('a purge of the read-source page scrubs the held proposal of its split atom generation in the write source (0.60.731 port)', async () => {
+    const insertHeld = (sourceId: string, ownerKey: string) => engine.executeRaw(`INSERT INTO derived_generations
+      (source_id, kind, owner_key, state, operation_id, item_set_hash, held_reason, proposal)
+      VALUES ($1, 'atom', $2, 'held', 'op-test', 'h', 'oversize', $3)`, [sourceId, ownerKey, [{ key: 'atoms/x', text: 'held text from the page' }]]);
+    await addSource('notes');
+    await insertHeld('derived', `source_slug@wiki:${slug}`);
+    await insertHeld('derived', `source_slug@notes:${slug}`); // another read source's page with the same slug: kept
+    const result = await scrubGenerationLedger(engine, 'wiki', { slug });
+    const rows = await engine.executeRaw<{ owner_key: string; scrubbed: boolean }>(
+      "SELECT owner_key, proposal IS NULL AS scrubbed FROM derived_generations WHERE state='held' ORDER BY owner_key");
+    expect(rows).toEqual([{ owner_key: `source_slug@notes:${slug}`, scrubbed: false }, { owner_key: `source_slug@wiki:${slug}`, scrubbed: true }]);
+    expect(result.derived_generations).toBeGreaterThanOrEqual(1);
   });
 
   test('stale-atoms apply retires a split atom under its qualified owner key and makes no second ledger lineage (finding 1)', async () => {
