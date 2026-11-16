@@ -29,6 +29,7 @@ import { publicBody } from '../mentions/aliases.ts';
 import { serializePageToMarkdown } from '../markdown.ts';
 import { OperationError } from '../ops/contract.ts';
 import { submitPageMutation } from '../persistence/page-mutations.ts';
+import { atomOriginSourceSql } from '../persistence/atom-origin.ts';
 import { clearApprovedSet, loadApprovedSet, previewChangedError, previewHash, saveApprovedSet } from '../persistence/preview-approval.ts';
 import { afterCursor, repairRequestId, type RepairHandler, type RepairItem, type RepairItemOutcome, type RepairPlan, type RepairScope } from './core.ts';
 
@@ -88,7 +89,7 @@ export async function findAtomFenceRows(engine: BrainEngine, sourceIds: string[]
               concat_ws(E'\\n', a.title, a.compiled_truth, a.frontmatter->>'source_quote') AS text,
               o.id AS origin_id, o.slug AS origin_slug, o.content_hash AS origin_hash, o.compiled_truth IS NULL AS origin_unread
          FROM pages a
-         JOIN pages o ON o.source_id=a.source_id AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL
+         JOIN pages o ON o.source_id=${atomOriginSourceSql('a')} AND o.slug=a.frontmatter->>'source_slug' AND o.deleted_at IS NULL
         WHERE a.source_id=ANY($1::text[]) AND a.type='atom' AND a.deleted_at IS NULL AND a.frontmatter->>'visibility'='world'
           AND ($2::int IS NULL OR a.id=$2::int) AND a.id>$3
           AND (o.compiled_truth IS NULL OR strpos(o.compiled_truth, 'gbrain:facts:begin')>0 OR strpos(o.compiled_truth, 'gbrain:takes:begin')>0)

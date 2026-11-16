@@ -13,13 +13,15 @@ import { isMissingSchemaObject } from '../utils.ts';
 import { SOURCE_ID_RE } from '../source-id.ts';
 import { parseSourceConfig } from '../sources-load.ts';
 import { managedPersistenceEnabled } from '../persistence/ownership.ts';
+import { guestSourceVerdict } from '../guests/note.ts';
+import { isStorageManifestSource } from '../storage-manifest/door.ts';
 
 /** `sources.config` key, set on the source pages are READ from. */
 export const EXTRACT_ATOMS_WRITE_SOURCE_KEY = 'extract_atoms_write_source';
 
 export { SOURCE_PAGE_SOURCE_ID_KEY } from '../generations/adapters/atoms.ts';
 
-export type WriteSourceRefusalCode = 'invalid_write_source' | 'write_source_missing' | 'write_source_archived' | 'persistence_brain_enabled';
+export type WriteSourceRefusalCode = 'invalid_write_source' | 'write_source_missing' | 'write_source_archived' | 'write_source_guest' | 'write_source_storage' | 'persistence_brain_enabled';
 
 /** A configured split that cannot run. Loud by design: falling back to the read source would write where the operator redirected away from. */
 export class ExtractAtomsWriteSourceError extends Error {
@@ -53,8 +55,9 @@ export async function configuredWriteSource(engine: BrainEngine, readSourceId: s
 
 /**
  * Resolve and validate the split for one run. Throws ExtractAtomsWriteSourceError when a split is configured and
- * cannot run: an invalid or unregistered or archived target, or managed persistence on (its session, owner and
- * authority checks assume one source).
+ * cannot run: an invalid or unregistered or archived target, a guest source or the storage shelf as the target (the
+ * phase skips both as READ sources, so it must not write derived atoms into them either; a failed guest lookup counts
+ * as guest), or managed persistence on (its session, owner and authority checks assume one source).
  */
 export async function resolveExtractAtomsSources(engine: BrainEngine, readSourceId: string): Promise<ExtractAtomsSources> {
   const writeSourceId = await configuredWriteSource(engine, readSourceId);
@@ -69,6 +72,12 @@ export async function resolveExtractAtomsSources(engine: BrainEngine, readSource
   const [target] = await engine.executeRaw<{ archived: boolean }>('SELECT archived FROM sources WHERE id = $1', [writeSourceId]);
   if (!target) throw refuse('write_source_missing', `Source ${readSourceId} sets ${EXTRACT_ATOMS_WRITE_SOURCE_KEY}=${writeSourceId}, but no source ${writeSourceId} is registered. Nothing was extracted.`);
   if (target.archived) throw refuse('write_source_archived', `Source ${readSourceId} sets ${EXTRACT_ATOMS_WRITE_SOURCE_KEY}=${writeSourceId}, which is archived. Nothing was extracted.`);
+  if ((await guestSourceVerdict(engine, writeSourceId)).guest) {
+    throw refuse('write_source_guest', `Source ${readSourceId} sets ${EXTRACT_ATOMS_WRITE_SOURCE_KEY}=${writeSourceId}, which is a guest source (or its guest status could not be read); derived atoms never go into a guest source. Nothing was extracted.`);
+  }
+  if (await isStorageManifestSource(engine, writeSourceId)) {
+    throw refuse('write_source_storage', `Source ${readSourceId} sets ${EXTRACT_ATOMS_WRITE_SOURCE_KEY}=${writeSourceId}, which is the storage shelf; it holds archive records, not atoms. Nothing was extracted.`);
+  }
   return { readSourceId, writeSourceId, split: true };
 }
 

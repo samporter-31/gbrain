@@ -16,6 +16,9 @@ import { planVisibilityRepair } from '../src/core/repair/visibility.ts';
 import { derivedVisibilityCheck } from '../src/commands/doctor/checks/derived-visibility.ts';
 import { computeAtomProvenanceDriftCheck } from '../src/commands/doctor/checks/extraction-sync.ts';
 import { privatePagesFilterFragment } from '../src/core/search/private-visibility.ts';
+import { findAtomFenceRows } from '../src/core/repair/atom-fence-rows.ts';
+import { STORAGE_ROLE } from '../src/core/storage-manifest/door.ts';
+import { PRIVATE_ROW, WORLD_PAGE_BODY } from './helpers/world-fence-page.ts';
 import type { ChatResult } from '../src/core/ai/gateway.ts';
 
 let engine: PGLiteEngine;
@@ -277,6 +280,20 @@ describe('refusals are loud, spend nothing and write nothing', () => {
     await expectRefusal('write_source_archived');
   });
 
+  test('a guest write source refuses the split (the phase skips guest sources as read sources too)', async () => {
+    await addSource('wiki', { [EXTRACT_ATOMS_WRITE_SOURCE_KEY]: 'derived' });
+    await addSource('derived', { guest: true });
+    await seed('wiki');
+    await expectRefusal('write_source_guest');
+  });
+
+  test('the storage shelf as write source refuses the split', async () => {
+    await addSource('wiki', { [EXTRACT_ATOMS_WRITE_SOURCE_KEY]: 'derived' });
+    await addSource('derived', { role: STORAGE_ROLE });
+    await seed('wiki');
+    await expectRefusal('write_source_storage');
+  });
+
   test('a value that is not a source id refuses the split', async () => {
     await addSource('wiki', { [EXTRACT_ATOMS_WRITE_SOURCE_KEY]: 'Not A Source/../x' });
     await seed('wiki');
@@ -363,6 +380,17 @@ describe('the other places that assume an atom\'s origin page is in the atom\'s 
     await engine.executeRaw("UPDATE pages SET deleted_at = now() WHERE source_id = 'wiki' AND slug = $1", [slug]);
     const check = await computeAtomProvenanceDriftCheck(engine);
     expect(check.details).toMatchObject({ total_atoms: 2, drifted: 2, source_gone: 2 });
+  });
+
+  test('atom-fence-rows finds a world split atom carrying a hidden fence row of its read-source page (0.60.731 port)', async () => {
+    const origin = 'notes/launch-review';
+    await engine.putPage(origin, { type: 'note', title: 'Launch review', compiled_truth: WORLD_PAGE_BODY, timeline: '' }, { sourceId: 'wiki' });
+    await engine.putPage('atoms/2026-01-01/renewal-terms', { type: 'atom', title: 'renewal-terms', compiled_truth: `Recorded on the page: ${PRIVATE_ROW}.`,
+      frontmatter: { type: 'atom', atom_type: 'insight', source_slug: origin, source_page_source_id: 'wiki', source_hash: 'aaaaaaaaaaaaaaaa',
+        visibility: 'world', dream_generated: true } }, { sourceId: 'derived' });
+    const { atoms } = await findAtomFenceRows(engine, ['derived']);
+    expect(atoms.map(atom => ({ slug: atom.slug, source_id: atom.source_id, origin_slug: atom.origin_slug }))).toEqual([
+      { slug: 'atoms/2026-01-01/renewal-terms', source_id: 'derived', origin_slug: origin }]);
   });
 
   test('stale-atoms apply retires a split atom under its qualified owner key and makes no second ledger lineage (finding 1)', async () => {
